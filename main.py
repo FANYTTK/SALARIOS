@@ -1,9 +1,16 @@
 """
 Salary Predictor - App de Streamlit
 ====================================
-Carga el modelo entrenado en Salary_Prediction_v14_Final.ipynb (archivo
-salary_model_v14.pkl) y predice el salario anual sugerido a partir de los
-datos del candidato/empleado.
+Carga el modelo entrenado en Salary_Prediction_v15_NN.ipynb (Red Neuronal
+Keras): el archivo del modelo (salary_nn_model_v15.keras) y su metadata
+(salary_nn_metadata_v15.pkl, con scalers de X y de y, mapeos, bins, métricas
+e importancia de variables) y predice el salario anual sugerido a partir de
+los datos del candidato/empleado.
+
+Diferencia clave respecto a la versión anterior (modelo de árboles): aquí el
+modelo predice en una escala normalizada, así que la predicción SIEMPRE se
+revierte a dólares reales con scaler_y.inverse_transform() antes de usarse
+en cualquier parte de la app.
 
 Ejecutar con:
     streamlit run main.py
@@ -15,6 +22,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import streamlit as st
+import tensorflow as tf
 
 # --------------------------------------------------------------------------
 # Configuración general
@@ -26,7 +34,8 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-MODEL_PATH = "salary_model_v14.pkl"
+MODEL_PATH = "salary_nn_model_v15.keras"
+METADATA_PATH = "salary_nn_metadata_v15.pkl"
 
 # Tasa de cambio USD -> MXN. En producción, reemplazar por una llamada a una
 # API de tipo de cambio en tiempo real (p. ej. exchangerate.host, banxico, etc.)
@@ -49,6 +58,7 @@ ICONS = {
     "coin": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v10M9 9.5c0-1.4 1.3-2.5 3-2.5s3 1 3 2c0 3-6 1.5-6 4.5 0 1.4 1.3 2.5 3 2.5s3-1.1 3-2.5"/></svg>',
     "info": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v5h1"/></svg>',
     "history": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 2.6-6.3"/><path d="M3 4v5h5M12 7v5l4 2"/></svg>',
+    "cpu": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg>',
 }
 
 
@@ -101,6 +111,18 @@ st.markdown(
         color: #dce6f2;
         margin: 0;
     }
+    .hero-badge {
+        display: inline-flex;
+        align-items: center;
+        background: rgba(255,255,255,0.15);
+        border: 1px solid rgba(255,255,255,0.3);
+        border-radius: 999px;
+        padding: 0.3rem 0.9rem;
+        font-size: 0.8rem;
+        font-weight: 600;
+        margin-top: 0.9rem;
+    }
+    .hero-badge svg { width: 14px; height: 14px; margin-right: 6px; }
 
     /* ---------- CARDS (fondo blanco, texto oscuro forzado) ---------- */
     .card {
@@ -235,12 +257,20 @@ st.markdown(
 
 
 # --------------------------------------------------------------------------
-# Carga del modelo
+# Carga del modelo (red neuronal Keras) + su metadata (scalers, mapeos, etc.)
 # --------------------------------------------------------------------------
 @st.cache_resource
-def load_model(path: str):
+def load_metadata(path: str) -> dict:
     with open(path, "rb") as f:
         return pickle.load(f)
+
+
+@st.cache_resource
+def load_keras_model(path: str):
+    # compile=False porque solo hacemos predict(), no reentrenamos en la app;
+    # evita advertencias/errores si la versión de TF de la app difiere un poco
+    # de la usada al entrenar.
+    return tf.keras.models.load_model(path, compile=False)
 
 
 def build_features(model_data: dict, age, experience, qualification, university,
@@ -300,12 +330,22 @@ def build_features(model_data: dict, age, experience, qualification, university,
     return pd.DataFrame([ordered_row])
 
 
-def predict_salary(model_data: dict, features_df: pd.DataFrame) -> float:
+def predict_salary(model_data: dict, keras_model, features_df: pd.DataFrame) -> float:
+    """Predice el salario en dólares reales.
+
+    Diferencia clave frente al modelo de árboles: la red fue entrenada sobre
+    el target ESCALADO (scaler_y), así que su salida cruda no está en dólares.
+    Por eso aquí SIEMPRE se revierte con scaler_y.inverse_transform() antes de
+    devolver el número — nunca se debe usar la salida cruda de keras_model.predict()
+    directamente en ninguna otra parte de la app.
+    """
     scaler_X = model_data["scaler_X"]
-    model = model_data["model"]
+    scaler_y = model_data["scaler_y"]
+
     X_scaled = scaler_X.transform(features_df)
-    prediction = model.predict(X_scaled)[0]
-    return float(prediction)
+    prediction_scaled = keras_model.predict(X_scaled, verbose=0)
+    prediction_real = scaler_y.inverse_transform(prediction_scaled)
+    return float(prediction_real[0][0])
 
 
 # --------------------------------------------------------------------------
@@ -323,6 +363,7 @@ st.markdown(
         <div class="hero-title">{icon('coin', 30, '#ffffff')}Salary Predictor</div>
         <p>Estima el sueldo anual sugerido para un puesto a partir del perfil del candidato,
         usando un modelo de Machine Learning entrenado y validado.</p>
+        <div class="hero-badge">{icon('cpu', 14, '#ffffff')}Modelo: Red Neuronal (Keras)</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -332,15 +373,30 @@ st.markdown(
 # Carga de modelo con manejo de errores
 # --------------------------------------------------------------------------
 try:
-    model_data = load_model(MODEL_PATH)
+    model_data = load_metadata(METADATA_PATH)
 except FileNotFoundError:
     st.markdown(
         f"""
         <div class="error-note">
-            {icon('info', 16, '#7c2d12')}No se encontro el archivo del modelo <b>{MODEL_PATH}</b>.
-            Ejecuta primero el notebook <b>Salary_Prediction_v14_Final.ipynb</b>
+            {icon('info', 16, '#7c2d12')}No se encontro el archivo de metadata <b>{METADATA_PATH}</b>.
+            Ejecuta primero el notebook <b>Salary_Prediction_v15_NN.ipynb</b>
             (requiere conexion a internet para descargar el dataset y entrenar)
-            y coloca el .pkl generado en la misma carpeta que este archivo.
+            y coloca los archivos generados en la misma carpeta que este main.py.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.stop()
+
+try:
+    keras_model = load_keras_model(MODEL_PATH)
+except (FileNotFoundError, OSError):
+    st.markdown(
+        f"""
+        <div class="error-note">
+            {icon('info', 16, '#7c2d12')}No se encontro el archivo del modelo <b>{MODEL_PATH}</b>.
+            Ejecuta primero el notebook <b>Salary_Prediction_v13_NN.ipynb</b>
+            y coloca el .keras generado en la misma carpeta que este main.py.
         </div>
         """,
         unsafe_allow_html=True,
@@ -414,14 +470,16 @@ with col_result:
         features_df = build_features(
             model_data, age, experience, qualification, university, role_level, has_cert
         )
-        raw_prediction = predict_salary(model_data, features_df)
+        raw_prediction = predict_salary(model_data, keras_model, features_df)
 
         # --- Salvaguarda transparente contra extrapolaciones absurdas ---
-        # El modelo puede "inventar" valores sin sentido (p. ej. unos pocos dolares al anio)
-        # si la combinacion de entradas cae muy lejos de lo que vio en entrenamiento.
-        # En vez de mostrar ese numero crudo, o de ocultarlo, lo comparamos contra el rango
-        # de salarios REALMENTE observado en el entrenamiento (guardado en el .pkl) y, si
-        # se sale de ahi, lo ajustamos al limite mas cercano y lo dejamos explicito en pantalla.
+        # Aunque la red ya no tiene el problema de escala del modelo anterior
+        # (aqui la salida SIEMPRE se revierte con scaler_y antes de llegar aqui),
+        # sigue siendo posible que, para una combinacion de entradas muy alejada
+        # de lo visto en entrenamiento, la prediccion caiga fuera de un rango
+        # razonable. Por eso se compara contra el rango de salarios REALMENTE
+        # observado en el entrenamiento (guardado en la metadata) y, si se sale
+        # de ahi, se ajusta al limite mas cercano y se deja explicito en pantalla.
         salary_range = model_data.get("salary_range")
         out_of_range = False
         if salary_range is not None:
@@ -450,12 +508,12 @@ with col_result:
                 f"""
                 <div class="error-note">
                     {icon('info', 16, '#7c2d12')}El modelo, para esta combinacion exacta de datos,
-                    calculo un valor crudo de <b>${raw_prediction:,.0f} USD</b>, fuera del rango de
+                    calculo un valor de <b>${raw_prediction:,.0f} USD</b>, fuera del rango de
                     salarios observados durante el entrenamiento
                     (${salary_range['p01']:,.0f} - ${salary_range['p99']:,.0f} USD).
                     Es una senial de que esta combinacion de entradas es poco comun en los datos de
                     entrenamiento (extrapolacion), asi que el resultado se ajusto al limite mas
-                    cercano de ese rango en vez de mostrar el numero sin sentido.
+                    cercano de ese rango en vez de mostrar el numero sin contexto.
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -482,7 +540,7 @@ with col_result:
         )
         st.markdown(
             f"""
-            Este modelo (<b>{model_data['model_name']}</b>) tiene, sobre datos de prueba no vistos:
+            Este modelo (<b>Red Neuronal - Keras</b>) tiene, sobre datos de prueba no vistos:
             <ul>
                 <li><b>MAPE:</b> {mape:.2f} por ciento (error porcentual promedio)</li>
                 <li><b>MAE:</b> ${mae:,.0f} USD (error promedio en dolares)</li>
@@ -516,9 +574,16 @@ with col_result:
 
             importances = model_data.get("feature_importances")
             if importances:
-                st.markdown("**Importancia de cada variable para el modelo entrenado:**")
+                st.markdown(
+                    "**Importancia de cada variable (Permutation Importance) para el modelo entrenado:**"
+                )
                 imp_series = pd.Series(importances).sort_values(ascending=False)
                 st.bar_chart(imp_series)
+                st.caption(
+                    "Calculada mezclando cada variable en el set de prueba y midiendo cuanto empeora "
+                    "el error del modelo; a diferencia de un arbol, los pesos de una red neuronal no "
+                    "se interpretan directamente como importancia."
+                )
                 exp_rank = list(imp_series.index).index("Experience") + 1 if "Experience" in imp_series.index else None
                 if exp_rank:
                     st.caption(
